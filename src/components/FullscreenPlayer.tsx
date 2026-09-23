@@ -1,7 +1,20 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { PipedTrack } from "../utils/piped";
 import { getActiveLyricIndex, parseLrc, type LyricLine } from "../utils/lyrics";
-import { HeartIcon, PauseIcon, PlayIcon, PrevIcon, NextIcon, ShuffleIcon, RepeatIcon, QueueIcon, LyricsIcon, ChevronDownIcon, ClockIcon, MoonIcon } from "./icons";
+import {
+  HeartIcon,
+  PauseIcon,
+  PlayIcon,
+  PrevIcon,
+  NextIcon,
+  ShuffleIcon,
+  RepeatIcon,
+  QueueIcon,
+  LyricsIcon,
+  ChevronDownIcon,
+  ClockIcon,
+  MoonIcon,
+} from "./icons";
 
 function formatTime(seconds: number) {
   const safe = Math.max(0, Math.floor(seconds || 0));
@@ -9,6 +22,8 @@ function formatTime(seconds: number) {
   const s = String(safe % 60).padStart(2, "0");
   return `${m}:${s}`;
 }
+
+type RepeatMode = "off" | "all" | "one";
 
 type Props = {
   open: boolean;
@@ -23,7 +38,7 @@ type Props = {
   plainLyrics: string;
   syncedLyrics: string;
   shuffle: boolean;
-  repeat: "off" | "all" | "one";
+  repeat: RepeatMode;
   onClose: () => void;
   onTogglePlay: () => void;
   onPrev: () => void;
@@ -41,32 +56,11 @@ type Props = {
 
 export function FullscreenPlayer(props: Props) {
   const {
-    open,
-    track,
-    playing,
-    liked,
-    progress,
-    currentTime,
-    duration,
-    loadingStream,
-    lyricsLoading,
-    plainLyrics,
-    syncedLyrics,
-    shuffle,
-    repeat,
-    onClose,
-    onTogglePlay,
-    onPrev,
-    onNext,
-    onToggleLike,
-    onSeek,
-    onToggleShuffle,
-    onCycleRepeat,
-    onOpenQueue,
-    onOpenSleep,
-    onOpenStats,
-    onArtistClick,
-    accent,
+    open, track, playing, liked, progress, currentTime, duration,
+    loadingStream, lyricsLoading, plainLyrics, syncedLyrics, shuffle, repeat,
+    onClose, onTogglePlay, onPrev, onNext, onToggleLike, onSeek,
+    onToggleShuffle, onCycleRepeat, onOpenQueue, onOpenSleep, onOpenStats,
+    onArtistClick, accent,
   } = props;
 
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -77,7 +71,7 @@ export function FullscreenPlayer(props: Props) {
     if (synced.length > 0) return synced;
     return plainLyrics
       .split("\n")
-      .map((line) => line.trim())
+      .map((l) => l.trim())
       .filter(Boolean)
       .map((text, index) => ({ time: index * 4, text }));
   }, [plainLyrics, syncedLyrics]);
@@ -89,11 +83,11 @@ export function FullscreenPlayer(props: Props) {
     const container = listRef.current;
     const active = itemRefs.current[activeIndex];
     if (!container || !active || activeIndex < 0) return;
-    const containerTop = container.scrollTop;
-    const containerBottom = containerTop + container.clientHeight;
+    const top = container.scrollTop;
+    const bottom = top + container.clientHeight;
     const lineTop = active.offsetTop;
     const lineBottom = lineTop + active.clientHeight;
-    if (lineTop < containerTop + 32 || lineBottom > containerBottom - 32) {
+    if (lineTop < top + 32 || lineBottom > bottom - 32) {
       container.scrollTo({
         top: Math.max(lineTop - container.clientHeight / 2 + active.clientHeight, 0),
         behavior: "smooth",
@@ -156,7 +150,7 @@ export function FullscreenPlayer(props: Props) {
               max={duration || track?.duration || 0}
               step={0.1}
               value={Math.min(currentTime, duration || track?.duration || 0)}
-              onChange={(event) => onSeek(Number(event.target.value))}
+              onChange={(e) => onSeek(Number(e.target.value))}
               style={{ ["--range-progress" as string]: `${progress}%` }}
             />
             <div className="fs-time">
