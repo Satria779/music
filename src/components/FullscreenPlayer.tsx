@@ -171,7 +171,12 @@ export function FullscreenPlayer(props: Props) {
             <button type="button" className="icon-ghost-btn fs-ctrl" onClick={onPrev} aria-label="Sebelumnya">
               <PrevIcon />
             </button>
-            <button type="button" className="play-pause-btn-ref fs-play" onClick={onTogglePlay} aria-label={playing ? "Pause" : "Play"}>
+            <button
+              type="button"
+              className="play-pause-btn-ref fs-play"
+              onClick={onTogglePlay}
+              aria-label={playing ? "Pause" : "Play"}
+            >
               {playing ? <PauseIcon /> : <PlayIcon />}
             </button>
             <button type="button" className="icon-ghost-btn fs-ctrl" onClick={onNext} aria-label="Berikutnya">
@@ -201,7 +206,9 @@ export function FullscreenPlayer(props: Props) {
           <section className="fs-lyrics-block" aria-live="polite">
             <header className="fs-lyrics-header">
               <LyricsIcon className="icon-18" />
-              <span>{lyricsLoading ? "Memuat lirik..." : lines.length > 0 ? "Lirik" : "Lirik belum tersedia"}</span>
+              <span>
+                {lyricsLoading ? "Memuat lirik..." : lines.length > 0 ? "Lirik" : "Lirik belum tersedia"}
+              </span>
             </header>
             <div className="fs-lyrics-list" ref={listRef}>
               {lines.length > 0 ? (
