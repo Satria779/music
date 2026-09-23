@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import ReactPlayer from "react-player";
 import { getActiveLyricIndex, getLyrics, parseLrc, type LyricLine } from "./utils/lyrics";
 import {
@@ -12,33 +12,55 @@ import {
   type PlayableSource,
 } from "./utils/musicApi";
 import { getPlaylistTracks, type PipedArtist, type PipedCollection, type PipedTrack } from "./utils/piped";
+import { readStorage, writeStorage, STORAGE_KEYS } from "./utils/storage";
+import { extractThemeFromImage, type ThemeAccent } from "./utils/color";
+import { deriveStats, EMPTY_STATS, type MusicStats } from "./utils/statistics";
+import { useMediaSession } from "./hooks/useMediaSession";
+import { useToast } from "./hooks/useToast";
+import { ToastStack } from "./components/Toast";
+import { QueueSheet } from "./components/QueueSheet";
+import { SleepTimerSheet } from "./components/SleepTimerSheet";
+import { FullscreenPlayer } from "./components/FullscreenPlayer";
+import { StatisticsSheet } from "./components/StatisticsSheet";
+import { PlaylistSheet, type CustomPlaylist } from "./components/PlaylistSheet";
+import {
+  HomeIcon,
+  SearchIcon,
+  LibraryIcon,
+  HeartIcon,
+  MusicIcon,
+  BroadcastIcon,
+  SpeakerLowIcon,
+  SpeakerHighIcon,
+  PrevIcon,
+  NextIcon,
+  PlayIcon,
+  PauseIcon,
+  ChevronDownIcon,
+  MenuIcon,
+  PlusIcon,
+  QueueIcon,
+  ShuffleIcon,
+  RepeatIcon,
+  ExpandIcon,
+  LyricsIcon,
+  XIcon,
+  ClockIcon,
+  TrashIcon,
+} from "./components/icons";
 
 type MainView = "home" | "search" | "library";
-type ActiveView = MainView | "artist";
+type ActiveView = MainView | "artist" | "stats";
 
-type FeedSection = {
-  id: string;
-  title: string;
-  tracks: PipedTrack[];
-};
-
-type SearchBundle = {
-  tracks: PipedTrack[];
-  albums: PipedCollection[];
-  playlists: PipedCollection[];
-  artists: PipedArtist[];
-};
-
-type ArtistDetail = {
-  artist: PipedArtist;
-  tracks: PipedTrack[];
-  albums: PipedCollection[];
-  playlists: PipedCollection[];
-};
+type FeedSection = { id: string; title: string; tracks: PipedTrack[] };
+type SearchBundle = { tracks: PipedTrack[]; albums: PipedCollection[]; playlists: PipedCollection[]; artists: PipedArtist[] };
+type ArtistDetail = { artist: PipedArtist; tracks: PipedTrack[]; albums: PipedCollection[]; playlists: PipedCollection[] };
+type RepeatMode = "off" | "all" | "one";
 
 const QUICK_SEARCHES = ["Hindia", "Membasuh", "Kunto Aji", "Feast", "Pamungkas", "Nadin Amizah"];
-const STORAGE_LIKES = "music-liked";
-const STORAGE_RECENT = "music-recent";
+const SEARCH_DEBOUNCE = 320;
+const RECENT_LIMIT = 50;
+const SEARCH_HISTORY_LIMIT = 12;
 
 const searchCategories = [
   { title: "Pop Indonesia", color: "#e13300", image: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?auto=format&fit=crop&w=400&q=80" },
@@ -50,7 +72,7 @@ const searchCategories = [
 ];
 
 function formatTime(seconds: number) {
-  const safeValue = Math.max(0, Math.floor(seconds));
+  const safeValue = Math.max(0, Math.floor(seconds || 0));
   const minutes = Math.floor(safeValue / 60);
   const remainingSeconds = String(safeValue % 60).padStart(2, "0");
   return `${minutes}:${remainingSeconds}`;
@@ -62,15 +84,6 @@ function dedupeTracks(tracks: PipedTrack[]) {
     if (!map.has(track.id)) map.set(track.id, track);
   });
   return Array.from(map.values());
-}
-
-function tryParse<T>(value: string | null, fallback: T) {
-  if (!value) return fallback;
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return fallback;
-  }
 }
 
 function cleanForLyrics(value: string) {
@@ -114,7 +127,6 @@ function filterHomeTracks(tracks: PipedTrack[]) {
     "bollywood dj non stop remix(remix by dj jitesh,psynth)",
     "the gym beats",
   ];
-
   return tracks.filter((track) => {
     const target = `${track.title} ${track.artist}`.toLowerCase();
     if (blocked.test(target)) return false;
@@ -124,7 +136,6 @@ function filterHomeTracks(tracks: PipedTrack[]) {
 
 function chooseBestArtistMatch(targetName: string, artists: PipedArtist[]) {
   const normalizedTarget = normalizeName(targetName);
-
   return (
     artists.find((item) => normalizeName(item.name) === normalizedTarget) ||
     artists.find((item) => normalizeName(item.name).startsWith(normalizedTarget)) ||
@@ -147,128 +158,7 @@ function isCollectionFromArtist(item: PipedCollection, artistName: string) {
   return creator.includes(normalizedArtist) || title.includes(normalizedArtist);
 }
 
-function HomeIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M4.5 10.4 12 4.7l7.5 5.7V20h-5.2v-5.2h-4.6V20H4.5v-9.6Z" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function SearchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="11" cy="11" r="6.6" stroke="currentColor" strokeWidth="1.9" />
-      <path d="m16 16 4 4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function LibraryIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M5.2 4.8h2.5v14.4H5.2zm5.5-1.1h2.5v16.6h-2.5zm5.5 2.2h2.6v12.2h-2.6z" fill="currentColor" />
-    </svg>
-  );
-}
-
-function HeartIcon({ filled }: { filled?: boolean }) {
-  return (
-    <svg viewBox="0 0 24 24" className={`heart-icon ${filled ? "is-liked" : ""}`} fill={filled ? "currentColor" : "none"} aria-hidden="true">
-      <path d="M12 20.8 4.9 14c-1.5-1.4-2.4-3.1-2.4-5.3C2.5 5.5 5 3 8.1 3c1.7 0 3.3.8 4.4 2.1C13.6 3.8 15.2 3 16.9 3 20 3 22.5 5.5 22.5 8.7c0 2.2-.9 3.9-2.4 5.3L12 20.8Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function MusicIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M9 17.5V6.7L19 4v10.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="7" cy="18" r="2.8" stroke="currentColor" strokeWidth="1.8" />
-      <circle cx="17" cy="18" r="2.8" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M9 10.4 19 7.9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function BroadcastIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M3.5 9.2a13.8 13.8 0 0 1 17 0" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-      <path d="M6.8 12.7a8.9 8.9 0 0 1 10.4 0" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-      <path d="M10 16a4.6 4.6 0 0 1 4 0" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-      <circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
-
-function SpeakerLowIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="volume-icon" fill="none" aria-hidden="true">
-      <path d="M11 5 6.6 8.3H4v7.4h2.6L11 19V5Z"></path>
-    </svg>
-  );
-}
-
-function SpeakerHighIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="volume-icon" fill="none" aria-hidden="true">
-      <path d="M10.8 5 6.5 8.3H4v7.4h2.5l4.3 3.3V5Z"></path>
-      <path d="M15.2 9.1a4.2 4.2 0 0 1 0 5.8"></path>
-      <path d="M18 7a8 8 0 0 1 0 10"></path>
-    </svg>
-  );
-}
-
-function PrevIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M11 12 21 18.8V5.2L11 12ZM3 5.2v13.6h2.2V5.2H3Zm4.2 6.8 10 6.8V5.2L7.2 12Z"></path>
-    </svg>
-  );
-}
-
-function NextIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M13 5.2v13.6L23 12 13 5.2ZM18.8 5.2v13.6H21V5.2h-2.2ZM6.8 5.2v13.6L16.8 12 6.8 5.2Z"></path>
-    </svg>
-  );
-}
-
-function PlayIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M7.2 4.8 19.8 12 7.2 19.2V4.8Z"></path>
-    </svg>
-  );
-}
-
-function PauseIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M6.5 4.8h4.2v14.4H6.5zm6.8 0h4.2v14.4h-4.2z"></path>
-    </svg>
-  );
-}
-
-function ChevronDownIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M6 9.5 12 15l6-5.5" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function MenuIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="5" cy="12" r="1.6"></circle>
-      <circle cx="12" cy="12" r="1.6"></circle>
-      <circle cx="19" cy="12" r="1.6"></circle>
-    </svg>
-  );
-}
+/* Small components reused from original file (Skeleton, TrackRow, etc.) preserved above. */
 
 function Equalizer({ active }: { active: boolean }) {
   return (
@@ -349,18 +239,24 @@ function TrackRow({
   active,
   onClick,
   onArtistClick,
+  onLike,
+  onAddToQueue,
+  liked,
   right,
 }: {
   track: PipedTrack;
   active?: boolean;
   onClick: () => void;
   onArtistClick?: () => void;
+  onLike?: () => void;
+  onAddToQueue?: () => void;
+  liked?: boolean;
   right?: ReactNode;
 }) {
   return (
     <div className={`v-item ${active ? "active" : ""}`}>
       <button type="button" className="track-cover-btn" onClick={onClick}>
-        <img className="v-img" src={track.artwork} alt={track.title} />
+        <img className="v-img" src={track.artwork} alt={track.title} loading="lazy" />
       </button>
       <div className="v-info text-left">
         <button type="button" className="track-title-btn" onClick={onClick}>
@@ -370,9 +266,23 @@ function TrackRow({
           <div className="v-sub">{track.artist}</div>
         </button>
       </div>
-      <button type="button" className="dots-icon track-right-btn" onClick={onClick}>
-        {right}
-      </button>
+      <div className="v-actions">
+        {onLike ? (
+          <button type="button" className={`icon-ghost-btn ${liked ? "liked" : ""}`} onClick={onLike} aria-label="Suka">
+            <HeartIcon filled={liked} />
+          </button>
+        ) : null}
+        {onAddToQueue ? (
+          <button type="button" className="icon-ghost-btn" onClick={onAddToQueue} aria-label="Tambah ke queue">
+            <PlusIcon className="icon-18" />
+          </button>
+        ) : null}
+        {right ? (
+          <button type="button" className="dots-icon track-right-btn" onClick={onClick}>
+            {right}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -389,7 +299,7 @@ function HorizontalTrackCard({
   return (
     <div className="h-card text-left">
       <button type="button" className="h-card-main" onClick={onClick}>
-        <img className="h-img" src={track.artwork} alt={track.title} />
+        <img className="h-img" src={track.artwork} alt={track.title} loading="lazy" />
         <div className="h-title">{track.title}</div>
       </button>
       <button type="button" className="artist-link-btn horizontal" onClick={onArtistClick}>
@@ -402,7 +312,7 @@ function HorizontalTrackCard({
 function HorizontalCollectionCard({ item, onClick }: { item: PipedCollection; onClick: () => void }) {
   return (
     <button type="button" className="h-card text-left" onClick={onClick}>
-      <img className="h-img" src={item.artwork} alt={item.title} />
+      <img className="h-img" src={item.artwork} alt={item.title} loading="lazy" />
       <div className="h-title">{item.title}</div>
       <div className="h-sub">{item.creator}</div>
     </button>
@@ -412,7 +322,7 @@ function HorizontalCollectionCard({ item, onClick }: { item: PipedCollection; on
 function HorizontalArtistCard({ artist, onClick }: { artist: PipedArtist; onClick: () => void }) {
   return (
     <button type="button" className="h-card text-left" onClick={onClick}>
-      <img className="h-img artist-img" src={artist.artwork} alt={artist.name} />
+      <img className="h-img artist-img" src={artist.artwork} alt={artist.name} loading="lazy" />
       <div className="h-title">{artist.name}</div>
       <div className="h-sub">{artist.subscribersText} subscriber</div>
     </button>
@@ -428,6 +338,10 @@ function PlayerCard({
   duration,
   volume,
   loadingStream,
+  shuffle,
+  repeat,
+  queueCount,
+  sleepRemainingMs,
   onClose,
   onTogglePlay,
   onPrev,
@@ -437,6 +351,12 @@ function PlayerCard({
   onArtistClick,
   onSeek,
   onVolume,
+  onToggleShuffle,
+  onCycleRepeat,
+  onOpenQueue,
+  onOpenLyrics,
+  onOpenSleep,
+  onOpenPlaylist,
 }: {
   track: PipedTrack | null;
   playing: boolean;
@@ -446,6 +366,10 @@ function PlayerCard({
   duration: number;
   volume: number;
   loadingStream: boolean;
+  shuffle: boolean;
+  repeat: RepeatMode;
+  queueCount: number;
+  sleepRemainingMs: number;
   onClose: () => void;
   onTogglePlay: () => void;
   onPrev: () => void;
@@ -455,6 +379,12 @@ function PlayerCard({
   onArtistClick?: () => void;
   onSeek: (value: number) => void;
   onVolume: (value: number) => void;
+  onToggleShuffle: () => void;
+  onCycleRepeat: () => void;
+  onOpenQueue: () => void;
+  onOpenLyrics: () => void;
+  onOpenSleep: () => void;
+  onOpenPlaylist: () => void;
 }) {
   return (
     <div className="player-phone-shell">
@@ -507,9 +437,44 @@ function PlayerCard({
           </div>
 
           <div className="playback-controls-ref">
+            <button
+              type="button"
+              className={`ghost-player-btn small ${shuffle ? "active" : ""}`}
+              onClick={onToggleShuffle}
+              aria-label="Shuffle"
+            >
+              <ShuffleIcon className="icon-22" />
+            </button>
             <button type="button" className="ghost-player-btn" onClick={onPrev}><PrevIcon /></button>
             <button type="button" className="play-pause-btn-ref" onClick={onTogglePlay}>{playing ? <PauseIcon /> : <PlayIcon />}</button>
             <button type="button" className="ghost-player-btn" onClick={onNext}><NextIcon /></button>
+            <button
+              type="button"
+              className={`ghost-player-btn small ${repeat !== "off" ? "active" : ""}`}
+              onClick={onCycleRepeat}
+              aria-label={`Repeat ${repeat}`}
+            >
+              <RepeatIcon className="icon-22" mode={repeat} />
+            </button>
+          </div>
+
+          <div className="player-quick-row">
+            <button type="button" className="pill-soft" onClick={onOpenQueue}>
+              <QueueIcon className="icon-18" />
+              <span>Queue{queueCount > 0 ? ` (${queueCount})` : ""}</span>
+            </button>
+            <button type="button" className="pill-soft" onClick={onOpenLyrics}>
+              <LyricsIcon className="icon-18" />
+              <span>Lirik</span>
+            </button>
+            <button type="button" className="pill-soft" onClick={onOpenPlaylist}>
+              <PlusIcon className="icon-18" />
+              <span>Playlist</span>
+            </button>
+            <button type="button" className="pill-soft" onClick={onOpenSleep}>
+              <ClockIcon className="icon-18" />
+              <span>{sleepRemainingMs > 0 ? "Timer aktif" : "Sleep"}</span>
+            </button>
           </div>
 
           <div className="volume-row-ref">
@@ -542,11 +507,18 @@ export default function App() {
   const playerRef = useRef<HTMLVideoElement | null>(null);
   const lyricsListRef = useRef<HTMLDivElement | null>(null);
   const lyricRefs = useRef<Array<HTMLParagraphElement | null>>([]);
+  const sleepTimerRef = useRef<number | null>(null);
+  const volumePersistRef = useRef(0);
 
   const [activeView, setActiveView] = useState<ActiveView>("home");
   const [returnView, setReturnView] = useState<MainView>("home");
   const [playerOpen, setPlayerOpen] = useState(false);
+  const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [playerMenuOpen, setPlayerMenuOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [sleepOpen, setSleepOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [playlistSheetOpen, setPlaylistSheetOpen] = useState(false);
 
   const [homeSections, setHomeSections] = useState<FeedSection[]>([]);
   const [albumRows, setAlbumRows] = useState<PipedCollection[]>([]);
@@ -555,6 +527,7 @@ export default function App() {
   const [searchInput, setSearchInput] = useState("");
   const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
   const [searchResults, setSearchResults] = useState<SearchBundle>({ tracks: [], albums: [], playlists: [], artists: [] });
+  const [searchHistory, setSearchHistory] = useState<string[]>(() => readStorage<string[]>(STORAGE_KEYS.searchHistory, []));
   const [artistDetail, setArtistDetail] = useState<ArtistDetail | null>(null);
   const [artistLoading, setArtistLoading] = useState(false);
   const [isHomeLoading, setIsHomeLoading] = useState(true);
@@ -564,19 +537,29 @@ export default function App() {
 
   const [currentTrack, setCurrentTrack] = useState<PipedTrack | null>(null);
   const [activeQueue, setActiveQueue] = useState<PipedTrack[]>([]);
+  const [manualQueue, setManualQueue] = useState<PipedTrack[]>(() => readStorage<PipedTrack[]>(STORAGE_KEYS.queue, []));
   const [queueTitle, setQueueTitle] = useState("Music");
-  const [likedTracks, setLikedTracks] = useState<Record<string, boolean>>({});
-  const [recentPlayed, setRecentPlayed] = useState<PipedTrack[]>([]);
+  const [likedTracks, setLikedTracks] = useState<Record<string, boolean>>(() => readStorage<Record<string, boolean>>(STORAGE_KEYS.likes, {}));
+  const [recentPlayed, setRecentPlayed] = useState<PipedTrack[]>(() => readStorage<PipedTrack[]>(STORAGE_KEYS.recent, []));
   const [playbackSource, setPlaybackSource] = useState<PlayableSource | null>(null);
   const [loadingStream, setLoadingStream] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(78);
+  const [volume, setVolume] = useState(() => readStorage<number>(STORAGE_KEYS.volume, 78));
+  const [shuffle, setShuffle] = useState<boolean>(() => readStorage<boolean>(STORAGE_KEYS.shuffle, false));
+  const [repeat, setRepeat] = useState<RepeatMode>(() => readStorage<RepeatMode>(STORAGE_KEYS.repeat, "off"));
+  const [sleepRemainingMs, setSleepRemainingMs] = useState(0);
+  const [stats, setStats] = useState<MusicStats>(() => readStorage<MusicStats>(STORAGE_KEYS.stats, EMPTY_STATS));
+  const [playlists, setPlaylists] = useState<CustomPlaylist[]>(() => readStorage<CustomPlaylist[]>(STORAGE_KEYS.playlists, []));
+  const [audioError, setAudioError] = useState("");
+  const [theme, setTheme] = useState<ThemeAccent | null>(null);
 
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [plainLyrics, setPlainLyrics] = useState("");
   const [syncedLyrics, setSyncedLyrics] = useState("");
+
+  const { toasts, show: showToast } = useToast();
 
   const playerBackground = currentTrack?.artwork || recentPlayed[0]?.artwork || "/images/satriamusic-cover.jpg";
   const visibleLyrics = useMemo<LyricLine[]>(() => {
@@ -596,34 +579,35 @@ export default function App() {
     [homeSections, recentPlayed, searchResults.tracks],
   );
 
-  const likedList = useMemo(() => {
-    return masterQueue.filter((track) => likedTracks[track.id]);
-  }, [likedTracks, masterQueue]);
-
+  const likedList = useMemo(() => masterQueue.filter((track) => likedTracks[track.id]), [likedTracks, masterQueue]);
   const recentList = recentPlayed.length > 0 ? recentPlayed.slice(0, 6) : homeSections[0]?.tracks.slice(0, 6) || [];
+  const derivedStats = useMemo(() => deriveStats(stats), [stats]);
 
+  // Persistence effects
+  useEffect(() => { writeStorage(STORAGE_KEYS.likes, likedTracks); }, [likedTracks]);
+  useEffect(() => { writeStorage(STORAGE_KEYS.recent, recentPlayed.slice(0, RECENT_LIMIT)); }, [recentPlayed]);
+  useEffect(() => { writeStorage(STORAGE_KEYS.queue, manualQueue); }, [manualQueue]);
+  useEffect(() => { writeStorage(STORAGE_KEYS.shuffle, shuffle); }, [shuffle]);
+  useEffect(() => { writeStorage(STORAGE_KEYS.repeat, repeat); }, [repeat]);
+  useEffect(() => { writeStorage(STORAGE_KEYS.searchHistory, searchHistory); }, [searchHistory]);
+  useEffect(() => { writeStorage(STORAGE_KEYS.playlists, playlists); }, [playlists]);
+  useEffect(() => { writeStorage(STORAGE_KEYS.stats, stats); }, [stats]);
   useEffect(() => {
-    setLikedTracks(tryParse<Record<string, boolean>>(localStorage.getItem(STORAGE_LIKES), {}));
-    setRecentPlayed(tryParse<PipedTrack[]>(localStorage.getItem(STORAGE_RECENT), []));
-  }, []);
+    if (volumePersistRef.current) window.clearTimeout(volumePersistRef.current);
+    volumePersistRef.current = window.setTimeout(() => writeStorage(STORAGE_KEYS.volume, volume), 400);
+    return () => {
+      if (volumePersistRef.current) window.clearTimeout(volumePersistRef.current);
+    };
+  }, [volume]);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_LIKES, JSON.stringify(likedTracks));
-  }, [likedTracks]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_RECENT, JSON.stringify(recentPlayed.slice(0, 12)));
-  }, [recentPlayed]);
-
+  // Home data load
   useEffect(() => {
     let cancelled = false;
-
     const loadHome = async () => {
       setIsHomeLoading(true);
       setHomeError("");
-
       try {
-        const [anyar, gembira, charts, galau, tiktok, hits, globalPop, albums, playlists, artistsMain, artistsIndo, artistsGlobal] = await Promise.all([
+        const [anyar, gembira, charts, galau, tiktok, hits, globalPop, albums, playlistsRes, artistsMain, artistsIndo, artistsGlobal] = await Promise.all([
           searchTracks("baru rilis indonesia official audio"),
           searchTracks("lagu semangat indonesia official audio"),
           getTrendingTracks("ID"),
@@ -637,44 +621,30 @@ export default function App() {
           searchArtists("Hindia Tulus Sheila On 7 Pamungkas Nadin Amizah Kunto Aji"),
           searchArtists("Justin Bieber Billie Eilish Bruno Mars Taylor Swift Olivia Rodrigo The Weeknd"),
         ]);
-
         if (cancelled) return;
-
-        const safeAnyar = filterHomeTracks(anyar).slice(0, 12);
-        const safeGembira = filterHomeTracks(gembira).slice(0, 12);
-        const safeCharts = filterHomeTracks(charts).slice(0, 12);
-        const safeGalau = filterHomeTracks(galau).slice(0, 12);
-        const safeTiktok = filterHomeTracks(tiktok).slice(0, 12);
-        const safeHits = filterHomeTracks(hits).slice(0, 12);
-        const safeGlobal = filterHomeTracks(globalPop).slice(0, 12);
-
-        setHomeSections([
-          { id: "anyar", title: "Rilis Anyar (Baru Rilis)", tracks: safeAnyar },
-          { id: "gembira", title: "Gembira & Semangat", tracks: safeGembira },
-          { id: "charts", title: "Tangga Lagu Populer", tracks: safeCharts },
-          { id: "global", title: "Global Pop Pilihan", tracks: safeGlobal },
-          { id: "galau", title: "Galau Terpopuler", tracks: safeGalau },
-          { id: "tiktok", title: "Viral TikTok", tracks: safeTiktok },
-          { id: "hits", title: "Hit terpopuler hari ini", tracks: safeHits },
-        ].filter((section) => section.tracks.length > 0));
+        const sections: FeedSection[] = [
+          { id: "anyar", title: "Rilis Anyar (Baru Rilis)", tracks: filterHomeTracks(anyar).slice(0, 12) },
+          { id: "gembira", title: "Gembira & Semangat", tracks: filterHomeTracks(gembira).slice(0, 12) },
+          { id: "charts", title: "Tangga Lagu Populer", tracks: filterHomeTracks(charts).slice(0, 12) },
+          { id: "global", title: "Global Pop Pilihan", tracks: filterHomeTracks(globalPop).slice(0, 12) },
+          { id: "galau", title: "Galau Terpopuler", tracks: filterHomeTracks(galau).slice(0, 12) },
+          { id: "tiktok", title: "Viral TikTok", tracks: filterHomeTracks(tiktok).slice(0, 12) },
+          { id: "hits", title: "Hit terpopuler hari ini", tracks: filterHomeTracks(hits).slice(0, 12) },
+        ].filter((section) => section.tracks.length > 0);
+        setHomeSections(sections);
 
         const mergedArtists = new Map<string, PipedArtist>();
         [...artistsIndo, ...artistsGlobal, ...artistsMain].forEach((artist) => {
-          if (!mergedArtists.has(artist.name.toLowerCase())) {
-            mergedArtists.set(artist.name.toLowerCase(), artist);
-          }
+          if (!mergedArtists.has(artist.name.toLowerCase())) mergedArtists.set(artist.name.toLowerCase(), artist);
         });
-
         setAlbumRows(albums.slice(0, 10));
-        setPlaylistRows(playlists.slice(0, 10));
+        setPlaylistRows(playlistsRes.slice(0, 10));
         setArtistRows(Array.from(mergedArtists.values()).slice(0, 14));
 
-        const fallbackTrack = safeCharts[0] || safeAnyar[0] || safeGembira[0] || safeGlobal[0] || null;
+        const fallbackTrack = sections[0]?.tracks[0] || null;
         if (fallbackTrack) {
-          setCurrentTrack((previous) => previous ?? fallbackTrack);
-          setActiveQueue((previous) => (previous.length > 0 ? previous : safeCharts));
-          setQueueTitle((previous) => (previous !== "Music" ? previous : "Tangga Lagu Populer"));
-          setDuration((previous) => previous || fallbackTrack.duration || 0);
+          setCurrentTrack((prev) => prev ?? fallbackTrack);
+          setDuration((prev) => prev || fallbackTrack.duration || 0);
         }
       } catch (error) {
         if (cancelled) return;
@@ -683,40 +653,27 @@ export default function App() {
         if (!cancelled) setIsHomeLoading(false);
       }
     };
-
     void loadHome();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
+  // Search suggestions (debounced)
   useEffect(() => {
-    if (!searchInput.trim()) {
-      setSearchSuggestions([]);
-      return;
-    }
-
+    if (!searchInput.trim()) { setSearchSuggestions([]); return; }
     const timeoutId = window.setTimeout(() => {
-      void getSearchSuggestions(searchInput)
-        .then((items) => setSearchSuggestions(items))
-        .catch(() => setSearchSuggestions([]));
-    }, 250);
-
+      void getSearchSuggestions(searchInput).then(setSearchSuggestions).catch(() => setSearchSuggestions([]));
+    }, SEARCH_DEBOUNCE);
     return () => window.clearTimeout(timeoutId);
   }, [searchInput]);
 
+  // Playback source
   useEffect(() => {
-    if (!currentTrack) {
-      setPlaybackSource(null);
-      return;
-    }
-
+    if (!currentTrack) { setPlaybackSource(null); return; }
     let cancelled = false;
     setLoadingStream(true);
+    setAudioError("");
     setPlaybackSource({ src: currentTrack.youtubeUrl, mode: "youtube" });
     setDuration(currentTrack.duration || 0);
-
     void getTrackPlaybackSource(currentTrack.videoId)
       .then((source) => {
         if (cancelled) return;
@@ -727,21 +684,15 @@ export default function App() {
         if (cancelled) return;
         setPlaybackSource({ src: currentTrack.youtubeUrl, mode: "youtube" });
       })
-      .finally(() => {
-        if (!cancelled) setLoadingStream(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
+      .finally(() => { if (!cancelled) setLoadingStream(false); });
+    return () => { cancelled = true; };
   }, [currentTrack?.id]);
 
+  // Lyrics
   useEffect(() => {
     let cancelled = false;
-
-    const loadLyrics = async () => {
+    const load = async () => {
       if (!currentTrack) return;
-
       setLyricsLoading(true);
       try {
         const result = await getLyrics(cleanForLyrics(currentTrack.title), cleanForLyrics(currentTrack.artist));
@@ -756,39 +707,99 @@ export default function App() {
         if (!cancelled) setLyricsLoading(false);
       }
     };
-
-    void loadLyrics();
-
-    return () => {
-      cancelled = true;
-    };
+    void load();
+    return () => { cancelled = true; };
   }, [currentTrack?.id]);
 
+  // Auto-scroll lyrics in mini player
   useEffect(() => {
     const container = lyricsListRef.current;
     const activeLine = lyricRefs.current[activeLyricIndex];
     if (!container || !activeLine || activeLyricIndex < 0) return;
-
     const containerTop = container.scrollTop;
     const containerBottom = containerTop + container.clientHeight;
     const lineTop = activeLine.offsetTop;
     const lineBottom = lineTop + activeLine.clientHeight;
-
     if (lineTop < containerTop + 24 || lineBottom > containerBottom - 24) {
-      container.scrollTo({
-        top: Math.max(lineTop - container.clientHeight / 2 + activeLine.clientHeight, 0),
-        behavior: "smooth",
-      });
+      container.scrollTo({ top: Math.max(lineTop - container.clientHeight / 2 + activeLine.clientHeight, 0), behavior: "smooth" });
     }
   }, [activeLyricIndex]);
 
+  useEffect(() => { if (!playerOpen) setPlayerMenuOpen(false); }, [playerOpen, currentTrack?.id]);
+
+  // Dynamic theme
   useEffect(() => {
-    if (!playerOpen) {
-      setPlayerMenuOpen(false);
-    }
-  }, [playerOpen, currentTrack?.id]);
+    if (!currentTrack?.artwork) { setTheme(null); return; }
+    let cancelled = false;
+    void extractThemeFromImage(currentTrack.artwork).then((result) => { if (!cancelled) setTheme(result); });
+    return () => { cancelled = true; };
+  }, [currentTrack?.artwork]);
+
+  // Stats tracking
+  const statsTrackRef = useRef<{ id: string; accumulated: number } | null>(null);
+  useEffect(() => {
+    statsTrackRef.current = currentTrack ? { id: currentTrack.id, accumulated: 0 } : null;
+  }, [currentTrack?.id]);
+
+  useEffect(() => {
+    if (!currentTrack || !isPlaying) return;
+    const id = window.setInterval(() => {
+      const state = statsTrackRef.current;
+      if (!state || state.id !== currentTrack.id) return;
+      state.accumulated += 1000;
+      setStats((prev) => ({ ...prev, totalListeningMs: prev.totalListeningMs + 1000 }));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [currentTrack?.id, isPlaying]);
+
+  // Media Session
+  useMediaSession(
+    currentTrack ? { title: currentTrack.title, artist: currentTrack.artist, artwork: currentTrack.artwork } : null,
+    isPlaying,
+    {
+      onPlay: () => setIsPlaying(true),
+      onPause: () => setIsPlaying(false),
+      onPrev: () => handlePrevious(),
+      onNext: () => handleNext(),
+    },
+  );
+
+  // Sleep timer
+  useEffect(() => {
+    if (sleepRemainingMs <= 0) return;
+    const interval = window.setInterval(() => {
+      setSleepRemainingMs((prev) => {
+        const next = prev - 1000;
+        if (next <= 0) {
+          setIsPlaying(false);
+          showToast("Sleep timer selesai. Audio dihentikan.");
+          return 0;
+        }
+        return next;
+      });
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [sleepRemainingMs > 0, showToast]);
+
+  // Keyboard shortcut for spacebar when player open
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement) return;
+      if (event.code === "Space" && playerOpen) {
+        event.preventDefault();
+        setIsPlaying((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [playerOpen]);
 
   const openTrack = (track: PipedTrack, queue: PipedTrack[], title: string) => {
+    if (currentTrack?.id === track.id) {
+      setPlayerOpen(true);
+      setIsPlaying(true);
+      return;
+    }
     setCurrentTrack(track);
     setActiveQueue(queue);
     setQueueTitle(title);
@@ -796,41 +807,85 @@ export default function App() {
     setDuration(track.duration || 0);
     setIsPlaying(true);
     setPlayerOpen(true);
-    setRecentPlayed((previous) => dedupeTracks([track, ...previous]).slice(0, 12));
-  };
-
-  const handleToggleLike = (track: PipedTrack) => {
-    setLikedTracks((previous) => ({
+    setRecentPlayed((previous) => dedupeTracks([track, ...previous]).slice(0, RECENT_LIMIT));
+    setStats((previous) => ({
       ...previous,
-      [track.id]: !previous[track.id],
+      totalPlayed: previous.totalPlayed + 1,
+      events: [
+        {
+          trackId: track.id,
+          title: track.title,
+          artist: track.artist,
+          artwork: track.artwork,
+          duration: track.duration,
+          playedAt: Date.now(),
+        },
+        ...previous.events,
+      ].slice(0, 500),
     }));
   };
 
-  const handleSearch = async (query = searchInput) => {
+  const handleToggleLike = (track: PipedTrack) => {
+    setLikedTracks((previous) => {
+      const next = { ...previous, [track.id]: !previous[track.id] };
+      showToast(next[track.id] ? "Ditambahkan ke Liked Songs." : "Dihapus dari Liked Songs.");
+      return next;
+    });
+  };
+
+  const handleAddToQueue = (track: PipedTrack) => {
+    setManualQueue((previous) => {
+      if (previous.some((item) => item.id === track.id)) {
+        showToast("Lagu sudah ada di queue.");
+        return previous;
+      }
+      showToast("Ditambahkan ke queue.");
+      return [...previous, track];
+    });
+  };
+
+  const handlePlayNext = (track: PipedTrack) => {
+    setManualQueue((previous) => [track, ...previous.filter((item) => item.id !== track.id)]);
+    showToast("Akan diputar berikutnya.");
+  };
+
+  const handleRemoveFromQueue = (trackId: string) => {
+    setManualQueue((previous) => previous.filter((item) => item.id !== trackId));
+  };
+
+  const handleMoveInQueue = (from: number, to: number) => {
+    setManualQueue((previous) => {
+      if (from < 0 || to < 0 || from >= previous.length || to >= previous.length) return previous;
+      const next = [...previous];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  };
+
+  const handleSearch = useCallback(async (query = searchInput) => {
     const trimmed = query.trim();
     if (!trimmed) return;
-
     setActiveView("search");
     setIsSearchLoading(true);
     setSearchMessage("Mencari lagu, album, playlist, dan artist...");
-
+    setSearchHistory((previous) => [trimmed, ...previous.filter((item) => item !== trimmed)].slice(0, SEARCH_HISTORY_LIMIT));
     try {
-      const [tracks, albums, playlists, artists] = await Promise.all([
+      const [tracks, albums, playlistsRes, artists] = await Promise.all([
         searchTracks(trimmed),
         searchAlbums(trimmed),
         searchPlaylists(trimmed),
         searchArtists(trimmed),
       ]);
-
-      setSearchResults({ tracks, albums, playlists, artists });
-      setSearchMessage(`Hasil untuk “${trimmed}”. Klik lagu untuk memutar.`);
+      setSearchResults({ tracks, albums, playlists: playlistsRes, artists });
+      setSearchMessage(`Hasil untuk "${trimmed}". Klik lagu untuk memutar.`);
     } catch (error) {
       setSearchMessage(error instanceof Error ? error.message : "Pencarian gagal.");
     } finally {
       setIsSearchLoading(false);
       setSearchSuggestions([]);
     }
-  };
+  }, [searchInput]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -842,7 +897,7 @@ export default function App() {
       const detail = await getPlaylistTracks(item.id);
       setActiveView("search");
       setSearchResults((previous) => ({ ...previous, tracks: detail.tracks }));
-      setSearchMessage(`Membuka ${item.type} “${detail.title}”. Klik lagu untuk memutar.`);
+      setSearchMessage(`Membuka ${item.type} "${detail.title}". Klik lagu untuk memutar.`);
     } catch (error) {
       setSearchMessage(error instanceof Error ? error.message : "Gagal membuka collection.");
     }
@@ -853,47 +908,80 @@ export default function App() {
     setActiveView("artist");
     setArtistLoading(true);
     setArtistDetail({ artist, tracks: [], albums: [], playlists: [] });
-
     try {
-      const [artistMatches, tracks, albums, playlists] = await Promise.all([
+      const [artistMatches, tracks, albums, playlistsRes] = await Promise.all([
         searchArtists(artist.name),
         searchTracks(`${artist.name} official songs`),
         searchAlbums(artist.name),
         searchPlaylists(artist.name),
       ]);
-
       const resolvedArtist = chooseBestArtistMatch(artist.name, artistMatches) ?? artist;
       const filteredTracks = tracks.filter((item) => isTrackFromArtist(item, resolvedArtist.name));
       const filteredAlbums = albums.filter((item) => isCollectionFromArtist(item, resolvedArtist.name));
-      const filteredPlaylists = playlists.filter((item) => isCollectionFromArtist(item, resolvedArtist.name));
-
+      const filteredPlaylists = playlistsRes.filter((item) => isCollectionFromArtist(item, resolvedArtist.name));
       setArtistDetail({
         artist: resolvedArtist,
         tracks: (filteredTracks.length > 0 ? filteredTracks : tracks).slice(0, 12),
         albums: (filteredAlbums.length > 0 ? filteredAlbums : albums).slice(0, 10),
-        playlists: (filteredPlaylists.length > 0 ? filteredPlaylists : playlists).slice(0, 10),
+        playlists: (filteredPlaylists.length > 0 ? filteredPlaylists : playlistsRes).slice(0, 10),
       });
     } finally {
       setArtistLoading(false);
     }
   };
 
-  const handleNext = () => {
-    const sourceQueue = activeQueue.length > 1 ? activeQueue : masterQueue;
-    if (sourceQueue.length === 0) return;
+  const combinedQueue = useMemo(() => {
+    if (manualQueue.length === 0) return activeQueue;
+    return dedupeTracks([...activeQueue, ...manualQueue]);
+  }, [activeQueue, manualQueue]);
 
-    const currentIndex = sourceQueue.findIndex((item) => item.id === currentTrack?.id);
-    const nextIndex = currentIndex === -1 || currentIndex === sourceQueue.length - 1 ? 0 : currentIndex + 1;
-    openTrack(sourceQueue[nextIndex], sourceQueue, sourceQueue === activeQueue ? queueTitle : "Music Mix");
+  const pickRandomIndex = (length: number, currentIndex: number) => {
+    if (length <= 1) return 0;
+    let next = currentIndex;
+    while (next === currentIndex) next = Math.floor(Math.random() * length);
+    return next;
   };
 
-  const handlePrevious = () => {
-    const sourceQueue = activeQueue.length > 1 ? activeQueue : masterQueue;
+  const advanceTrack = (direction: 1 | -1) => {
+    const sourceQueue = combinedQueue.length > 1 ? combinedQueue : masterQueue;
     if (sourceQueue.length === 0) return;
-
     const currentIndex = sourceQueue.findIndex((item) => item.id === currentTrack?.id);
-    const previousIndex = currentIndex <= 0 ? sourceQueue.length - 1 : currentIndex - 1;
-    openTrack(sourceQueue[previousIndex], sourceQueue, sourceQueue === activeQueue ? queueTitle : "Music Mix");
+
+    let nextIndex: number;
+
+    if (shuffle) {
+      nextIndex = pickRandomIndex(sourceQueue.length, currentIndex);
+    } else if (currentIndex === -1) {
+      nextIndex = 0;
+    } else if (direction === 1) {
+      nextIndex = (currentIndex + 1) % sourceQueue.length;
+    } else {
+      nextIndex = currentIndex <= 0 ? sourceQueue.length - 1 : currentIndex - 1;
+    }
+
+    openTrack(sourceQueue[nextIndex], sourceQueue === activeQueue ? activeQueue : sourceQueue, sourceQueue === activeQueue ? queueTitle : "Music Mix");
+  };
+
+  const handleNext = () => advanceTrack(1);
+  const handlePrevious = () => advanceTrack(-1);
+
+  const handleEnded = () => {
+    if (repeat === "one" && currentTrack) {
+      if (playerRef.current) {
+        playerRef.current.currentTime = 0;
+        void playerRef.current.play().catch(() => setIsPlaying(false));
+      }
+      return;
+    }
+    if (repeat === "off" && !shuffle) {
+      const sourceQueue = combinedQueue.length > 1 ? combinedQueue : masterQueue;
+      const currentIndex = sourceQueue.findIndex((item) => item.id === currentTrack?.id);
+      if (currentIndex >= sourceQueue.length - 1) {
+        setIsPlaying(false);
+        return;
+      }
+    }
+    handleNext();
   };
 
   const handleTogglePlay = () => {
@@ -904,19 +992,85 @@ export default function App() {
       }
       return;
     }
-    setIsPlaying((previous) => !previous);
+    setIsPlaying((prev) => !prev);
   };
 
   const handleSeek = (value: number) => {
-    if (playerRef.current) {
-      playerRef.current.currentTime = value;
-    }
+    if (playerRef.current) playerRef.current.currentTime = value;
     setCurrentTime(value);
+  };
+
+  const handleCycleRepeat = () => {
+    setRepeat((prev) => (prev === "off" ? "all" : prev === "all" ? "one" : "off"));
+  };
+
+  const handleSleepSelect = (minutes: number) => {
+    setSleepRemainingMs(minutes * 60 * 1000);
+    setSleepOpen(false);
+    showToast(`Sleep timer disetel ${minutes} menit.`);
+  };
+
+  const handleSleepCancel = () => {
+    setSleepRemainingMs(0);
+    showToast("Sleep timer dibatalkan.");
+  };
+
+  const clearSearchHistory = () => {
+    setSearchHistory([]);
+    showToast("Riwayat pencarian dihapus.");
+  };
+
+  const clearRecent = () => {
+    setRecentPlayed([]);
+    showToast("Riwayat terakhir diputar dihapus.");
+  };
+
+  const clearStats = () => {
+    setStats(EMPTY_STATS);
+    showToast("Statistik direset.");
+  };
+
+  const handleCreatePlaylist = (name: string) => {
+    const item: CustomPlaylist = { id: `pl-${Date.now()}`, name, tracks: [], createdAt: Date.now() };
+    setPlaylists((prev) => [item, ...prev]);
+    showToast(`Playlist "${name}" dibuat.`);
+  };
+
+  const handleRenamePlaylist = (id: string, name: string) => {
+    setPlaylists((prev) => prev.map((item) => (item.id === id ? { ...item, name } : item)));
+    showToast("Playlist diubah nama.");
+  };
+
+  const handleDeletePlaylist = (id: string) => {
+    setPlaylists((prev) => prev.filter((item) => item.id !== id));
+    showToast("Playlist dihapus.");
+  };
+
+  const handleAddToPlaylist = (playlistId: string, track: PipedTrack) => {
+    setPlaylists((prev) =>
+      prev.map((item) =>
+        item.id === playlistId && !item.tracks.some((t) => t.id === track.id)
+          ? { ...item, tracks: [...item.tracks, track] }
+          : item,
+      ),
+    );
+    showToast("Lagu ditambahkan ke playlist.");
+  };
+
+  const handleRemoveFromPlaylist = (playlistId: string, trackId: string) => {
+    setPlaylists((prev) => prev.map((item) => (item.id === playlistId ? { ...item, tracks: item.tracks.filter((t) => t.id !== trackId) } : item)));
+    showToast("Lagu dihapus dari playlist.");
+  };
+
+  const handlePlayCustomPlaylist = (playlist: CustomPlaylist) => {
+    if (playlist.tracks.length === 0) return;
+    openTrack(playlist.tracks[0], playlist.tracks, playlist.name);
   };
 
   return (
     <>
       <div className="app-bg" style={{ backgroundImage: `url(${playerBackground})` }}></div>
+      <div className="theme-glow" style={{ background: theme?.accentSoft || "transparent" }} aria-hidden="true" />
 
       <main className="app-shell">
         <section id="view-home" className={`view-section ${activeView === "home" ? "active" : ""}`}>
@@ -935,8 +1089,11 @@ export default function App() {
                     key={track.id}
                     track={track}
                     active={currentTrack?.id === track.id}
+                    liked={Boolean(likedTracks[track.id])}
                     onClick={() => openTrack(track, recentList, track.title)}
                     onArtistClick={() => void openArtist(artistFromTrack(track))}
+                    onLike={() => handleToggleLike(track)}
+                    onAddToQueue={() => handleAddToQueue(track)}
                     right={<span className="play-badge">▶</span>}
                   />
                 ))}
@@ -976,6 +1133,33 @@ export default function App() {
                   </div>
                 </div>
               ))}
+
+              {recentPlayed.length > 0 && (
+                <div className="section-container">
+                  <div className="section-title-row">
+                    <h2 className="section-title">Recently Played</h2>
+                    <button type="button" className="pill-soft small" onClick={clearRecent}>
+                      <TrashIcon className="icon-16" />
+                      <span>Bersihkan</span>
+                    </button>
+                  </div>
+                  <div className="vertical-list">
+                    {recentPlayed.slice(0, 6).map((track) => (
+                      <TrackRow
+                        key={`home-recent-${track.id}`}
+                        track={track}
+                        liked={Boolean(likedTracks[track.id])}
+                        active={currentTrack?.id === track.id}
+                        onClick={() => openTrack(track, recentPlayed, track.title)}
+                        onArtistClick={() => void openArtist(artistFromTrack(track))}
+                        onLike={() => handleToggleLike(track)}
+                        onAddToQueue={() => handleAddToQueue(track)}
+                        right={<span className="play-badge">▶</span>}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="section-container">
                 <h2 className="section-title">Album dan single populer</h2>
@@ -1021,6 +1205,11 @@ export default function App() {
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
             />
+            {searchInput && (
+              <button type="button" className="search-clear-btn" onClick={() => setSearchInput("")} aria-label="Hapus input">
+                <XIcon className="icon-16" />
+              </button>
+            )}
           </form>
 
           <div className="quick-search-row">
@@ -1029,15 +1218,37 @@ export default function App() {
                 key={item}
                 type="button"
                 className="pill"
-                onClick={() => {
-                  setSearchInput(item);
-                  void handleSearch(item);
-                }}
+                onClick={() => { setSearchInput(item); void handleSearch(item); }}
               >
                 {item}
               </button>
             ))}
           </div>
+
+          {searchHistory.length > 0 && !searchInput && (
+            <div className="section-container">
+              <div className="section-title-row">
+                <h2 className="section-title">Pencarian terakhir</h2>
+                <button type="button" className="pill-soft small" onClick={clearSearchHistory}>
+                  <TrashIcon className="icon-16" />
+                  <span>Hapus</span>
+                </button>
+              </div>
+              <div className="history-chip-row">
+                {searchHistory.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    className="history-chip"
+                    onClick={() => { setSearchInput(item); void handleSearch(item); }}
+                  >
+                    <SearchIcon />
+                    <span>{item}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {searchSuggestions.length > 0 && (
             <div className="section-container">
@@ -1047,10 +1258,7 @@ export default function App() {
                     key={item}
                     type="button"
                     className="search-suggestion"
-                    onClick={() => {
-                      setSearchInput(item);
-                      void handleSearch(item);
-                    }}
+                    onClick={() => { setSearchInput(item); void handleSearch(item); }}
                   >
                     <SearchIcon />
                     <span>{item}</span>
@@ -1070,13 +1278,10 @@ export default function App() {
                     type="button"
                     className="category-card"
                     style={{ backgroundColor: category.color }}
-                    onClick={() => {
-                      setSearchInput(category.title);
-                      void handleSearch(category.title);
-                    }}
+                    onClick={() => { setSearchInput(category.title); void handleSearch(category.title); }}
                   >
                     <div className="category-title">{category.title}</div>
-                    <img className="category-img" src={category.image} alt={category.title} />
+                    <img className="category-img" src={category.image} alt={category.title} loading="lazy" />
                   </button>
                 ))}
               </div>
@@ -1100,8 +1305,11 @@ export default function App() {
                         key={track.id}
                         track={track}
                         active={currentTrack?.id === track.id}
+                        liked={Boolean(likedTracks[track.id])}
                         onClick={() => openTrack(track, searchResults.tracks, track.title)}
                         onArtistClick={() => void openArtist(artistFromTrack(track))}
+                        onLike={() => handleToggleLike(track)}
+                        onAddToQueue={() => handleAddToQueue(track)}
                         right={<span className="play-badge">▶</span>}
                       />
                     ))}
@@ -1128,19 +1336,35 @@ export default function App() {
             <div className="lib-header-left">
               <h1 className="lib-title">Koleksi Kamu</h1>
             </div>
+            <button type="button" className="icon-ghost-btn" onClick={() => setStatsOpen(true)} aria-label="Statistik">
+              <ClockIcon className="icon-20" />
+            </button>
           </div>
 
           <div className="lib-filters">
-            <div className="pill">Disukai</div>
+            <div className="pill active">Disukai</div>
             <div className="pill">Terakhir</div>
+            <div className="pill">Playlist</div>
           </div>
 
           <div className="section-container">
-            <h2 className="section-title">Disukai</h2>
+            <div className="section-title-row">
+              <h2 className="section-title">Liked Songs</h2>
+              {likedList.length > 0 && (
+                <button
+                  type="button"
+                  className="pill-soft small"
+                  onClick={() => openTrack(likedList[0], likedList, "Liked Songs")}
+                >
+                  <PlayIcon />
+                  <span>Putar</span>
+                </button>
+              )}
+            </div>
             <div className="lib-list" id="libraryFavorites">
               {likedList.map((track) => (
-                <button key={track.id} type="button" className="lib-item" onClick={() => openTrack(track, likedList, track.title)}>
-                  <img className="lib-item-img" src={track.artwork} alt={track.title} />
+                <button key={track.id} type="button" className="lib-item" onClick={() => openTrack(track, likedList, "Liked Songs")}>
+                  <img className="lib-item-img" src={track.artwork} alt={track.title} loading="lazy" />
                   <div className="lib-item-info">
                     <div className="lib-item-title">{track.title}</div>
                     <div className="lib-item-sub">{track.artist}</div>
@@ -1152,11 +1376,52 @@ export default function App() {
           </div>
 
           <div className="section-container">
-            <h2 className="section-title">Terakhir</h2>
+            <div className="section-title-row">
+              <h2 className="section-title">Custom Playlist</h2>
+              <button
+                type="button"
+                className="pill-soft small"
+                onClick={() => { setPlaylistSheetOpen(true); }}
+              >
+                <PlusIcon className="icon-16" />
+                <span>Buat</span>
+              </button>
+            </div>
+            <div className="lib-list">
+              {playlists.map((playlist) => (
+                <button
+                  key={playlist.id}
+                  type="button"
+                  className="lib-item"
+                  onClick={() => playlist.tracks.length > 0 && openTrack(playlist.tracks[0], playlist.tracks, playlist.name)}
+                >
+                  <div className="playlist-lib-thumb">
+                    <FolderIcon className="icon-24" />
+                  </div>
+                  <div className="lib-item-info">
+                    <div className="lib-item-title">{playlist.name}</div>
+                    <div className="lib-item-sub">{playlist.tracks.length} lagu</div>
+                  </div>
+                </button>
+              ))}
+              {playlists.length === 0 && <div className="empty-copy">Belum ada playlist. Tekan "Buat" untuk memulai.</div>}
+            </div>
+          </div>
+
+          <div className="section-container">
+            <div className="section-title-row">
+              <h2 className="section-title">Terakhir</h2>
+              {recentPlayed.length > 0 && (
+                <button type="button" className="pill-soft small" onClick={clearRecent}>
+                  <TrashIcon className="icon-16" />
+                  <span>Bersihkan</span>
+                </button>
+              )}
+            </div>
             <div className="lib-list" id="libraryRecent">
-              {recentPlayed.map((track) => (
+              {recentPlayed.slice(0, RECENT_LIMIT).map((track) => (
                 <button key={`recent-${track.id}`} type="button" className="lib-item" onClick={() => openTrack(track, recentPlayed, track.title)}>
-                  <img className="lib-item-img" src={track.artwork} alt={track.title} />
+                  <img className="lib-item-img" src={track.artwork} alt={track.title} loading="lazy" />
                   <div className="lib-item-info">
                     <div className="lib-item-title">{track.title}</div>
                     <div className="lib-item-sub">Baru diputar • {track.artist}</div>
@@ -1199,8 +1464,11 @@ export default function App() {
                       key={track.id}
                       track={track}
                       active={currentTrack?.id === track.id}
+                      liked={Boolean(likedTracks[track.id])}
                       onClick={() => openTrack(track, artistDetail.tracks, artistDetail.artist.name)}
                       onArtistClick={() => void openArtist(artistFromTrack(track))}
+                      onLike={() => handleToggleLike(track)}
+                      onAddToQueue={() => handleAddToQueue(track)}
                       right={<span className="play-badge">▶</span>}
                     />
                   ))}
@@ -1235,7 +1503,7 @@ export default function App() {
       </main>
 
       {currentTrack && !playerOpen && (
-        <button className="mini-player" onClick={() => setPlayerOpen(true)}>
+        <div className="mini-player" onClick={() => setPlayerOpen(true)} role="button" tabIndex={0}>
           <img src={currentTrack.artwork} alt="Cover" />
           <div className="mini-player-info">
             <div className="mini-player-title">{currentTrack.title}</div>
@@ -1248,8 +1516,11 @@ export default function App() {
             <button type="button" className="mini-icon-btn" onClick={handleTogglePlay}>
               {isPlaying ? <PauseIcon /> : <PlayIcon />}
             </button>
+            <button type="button" className="mini-icon-btn" onClick={handleNext}>
+              <NextIcon />
+            </button>
           </div>
-        </button>
+        </div>
       )}
 
       <nav className="bottom-nav">
@@ -1267,7 +1538,7 @@ export default function App() {
         </button>
       </nav>
 
-      <div id="playerModal" className={`modal-overlay ${playerOpen ? "open" : ""}`}>
+      <div id="playerModal" className={`modal-overlay ${playerOpen ? "open" : ""}`} style={{ ["--accent" as string]: theme?.accent || "#1ed760" }}>
         <div id="playerBg" style={{ backgroundImage: `url(${playerBackground})` }}></div>
         <div className="player-modal-grid">
           <div className="player-modal-primary">
@@ -1280,15 +1551,25 @@ export default function App() {
               duration={duration || currentTrack?.duration || 0}
               volume={volume}
               loadingStream={loadingStream}
+              shuffle={shuffle}
+              repeat={repeat}
+              queueCount={manualQueue.length}
+              sleepRemainingMs={sleepRemainingMs}
               onClose={() => setPlayerOpen(false)}
               onTogglePlay={handleTogglePlay}
               onPrev={handlePrevious}
               onNext={handleNext}
               onLike={() => currentTrack && handleToggleLike(currentTrack)}
-              onMenu={() => setPlayerMenuOpen((previous) => !previous)}
+              onMenu={() => setPlayerMenuOpen((prev) => !prev)}
               onArtistClick={() => currentTrack && void openArtist(artistFromTrack(currentTrack))}
               onSeek={handleSeek}
               onVolume={setVolume}
+              onToggleShuffle={() => setShuffle((prev) => !prev)}
+              onCycleRepeat={handleCycleRepeat}
+              onOpenQueue={() => setQueueOpen(true)}
+              onOpenLyrics={() => setFullscreenOpen(true)}
+              onOpenSleep={() => setSleepOpen(true)}
+              onOpenPlaylist={() => setPlaylistSheetOpen(true)}
             />
 
             {playerMenuOpen && currentTrack && (
@@ -1296,20 +1577,42 @@ export default function App() {
                 <button
                   type="button"
                   className="player-menu-item"
-                  onClick={() => {
-                    handleToggleLike(currentTrack);
-                    setPlayerMenuOpen(false);
-                  }}
+                  onClick={() => { handleToggleLike(currentTrack); setPlayerMenuOpen(false); }}
                 >
-                  {likedTracks[currentTrack.id] ? "Hapus dari Koleksi Kamu" : "Tambahkan ke Koleksi Kamu"}
+                  {likedTracks[currentTrack.id] ? "Hapus dari Liked Songs" : "Tambahkan ke Liked Songs"}
                 </button>
                 <button
                   type="button"
                   className="player-menu-item"
-                  onClick={() => {
-                    void openArtist(artistFromTrack(currentTrack));
-                    setPlayerMenuOpen(false);
-                  }}
+                  onClick={() => { handleAddToQueue(currentTrack); setPlayerMenuOpen(false); }}
+                >
+                  Tambahkan ke Queue
+                </button>
+                <button
+                  type="button"
+                  className="player-menu-item"
+                  onClick={() => { handlePlayNext(currentTrack); setPlayerMenuOpen(false); }}
+                >
+                  Putar berikutnya
+                </button>
+                <button
+                  type="button"
+                  className="player-menu-item"
+                  onClick={() => { setPlaylistSheetOpen(true); setPlayerMenuOpen(false); }}
+                >
+                  Tambahkan ke Playlist
+                </button>
+                <button
+                  type="button"
+                  className="player-menu-item"
+                  onClick={() => { setFullscreenOpen(true); setPlayerMenuOpen(false); }}
+                >
+                  Buka Fullscreen Player
+                </button>
+                <button
+                  type="button"
+                  className="player-menu-item"
+                  onClick={() => { void openArtist(artistFromTrack(currentTrack)); setPlayerMenuOpen(false); }}
                 >
                   Lihat Profil Artis
                 </button>
@@ -1332,10 +1635,11 @@ export default function App() {
                 visibleLyrics.map((line, index) => (
                   <p
                     key={`${line.time}-${index}`}
-                    ref={(element) => {
-                      lyricRefs.current[index] = element;
-                    }}
+                    ref={(element) => { lyricRefs.current[index] = element; }}
                     className={`lyrics-line ${index === activeLyricIndex ? "active" : ""}`}
+                    onClick={() => line.time >= 0 && handleSeek(line.time)}
+                    role="button"
+                    tabIndex={0}
                   >
                     {line.text}
                   </p>
@@ -1344,9 +1648,91 @@ export default function App() {
                 <div className="empty-copy">Putar lagu untuk melihat lyrics realtime di sini.</div>
               )}
             </div>
+
+            <button type="button" className="primary-pill wide" onClick={() => setFullscreenOpen(true)}>
+              <ExpandIcon className="icon-18" />
+              <span>Buka lyrics fullscreen</span>
+            </button>
           </div>
         </div>
       </div>
+
+      <FullscreenPlayer
+        open={fullscreenOpen}
+        track={currentTrack}
+        playing={isPlaying}
+        liked={currentTrack ? Boolean(likedTracks[currentTrack.id]) : false}
+        progress={progress}
+        currentTime={currentTime}
+        duration={duration || currentTrack?.duration || 0}
+        loadingStream={loadingStream}
+        lyricsLoading={lyricsLoading}
+        plainLyrics={plainLyrics}
+        syncedLyrics={syncedLyrics}
+        shuffle={shuffle}
+        repeat={repeat}
+        onClose={() => setFullscreenOpen(false)}
+        onTogglePlay={handleTogglePlay}
+        onPrev={handlePrevious}
+        onNext={handleNext}
+        onToggleLike={() => currentTrack && handleToggleLike(currentTrack)}
+        onSeek={handleSeek}
+        onToggleShuffle={() => setShuffle((prev) => !prev)}
+        onCycleRepeat={handleCycleRepeat}
+        onOpenQueue={() => setQueueOpen(true)}
+        onOpenSleep={() => setSleepOpen(true)}
+        onOpenStats={() => setStatsOpen(true)}
+        onArtistClick={() => currentTrack && void openArtist(artistFromTrack(currentTrack))}
+        accent={theme?.accent || "#1ed760"}
+      />
+
+      <QueueSheet
+        open={queueOpen}
+        queue={combinedQueue}
+        currentTrackId={currentTrack?.id}
+        onClose={() => setQueueOpen(false)}
+        onPlayIndex={(index) => {
+          const track = combinedQueue[index];
+          if (track) openTrack(track, combinedQueue, queueTitle);
+          setQueueOpen(false);
+        }}
+        onRemove={handleRemoveFromQueue}
+        onMove={handleMoveInQueue}
+      />
+
+      <SleepTimerSheet
+        open={sleepOpen}
+        remainingMs={sleepRemainingMs}
+        onClose={() => setSleepOpen(false)}
+        onSelect={handleSleepSelect}
+        onCancel={handleSleepCancel}
+      />
+
+      <StatisticsSheet open={statsOpen} stats={derivedStats} onClose={() => setStatsOpen(false)} onClear={clearStats} />
+
+      <PlaylistSheet
+        open={playlistSheetOpen}
+        playlists={playlists}
+        track={currentTrack}
+        onClose={() => setPlaylistSheetOpen(false)}
+        onCreate={handleCreatePlaylist}
+        onRename={handleRenamePlaylist}
+        onDelete={handleDeletePlaylist}
+        onAddTrack={handleAddToPlaylist}
+        onRemoveTrack={handleRemoveFromPlaylist}
+        onPlay={handlePlayCustomPlaylist}
+      />
+
+      <ToastStack toasts={toasts} />
+
+      {audioError ? (
+        <div className="audio-error-banner" role="alert">
+          <span>{audioError}</span>
+          <button type="button" className="icon-ghost-btn" onClick={() => setAudioError("")} aria-label="Tutup">
+            <XIcon className="icon-16" />
+          </button>
+        </div>
+      ) : null}
 
       <div className="hidden-player-host" aria-hidden="true">
         <ReactPlayer
@@ -1361,11 +1747,15 @@ export default function App() {
           volume={volume / 100}
           onPlay={() => setIsPlaying(true)}
           onPause={() => setIsPlaying(false)}
-          onEnded={handleNext}
+          onError={() => {
+            setAudioError("Gagal memutar audio. Coba lagu lain atau periksa koneksi.");
+            setIsPlaying(false);
+          }}
+          onEnded={handleEnded}
           onDurationChange={(event) => setDuration(event.currentTarget.duration || currentTrack?.duration || 0)}
-          onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime || 0)}
+          onTimeUpdate={(event) => setCurrentTime(event.currentTarget.time || 0)}
         />
       </div>
     </>
   );
-}
+      }
